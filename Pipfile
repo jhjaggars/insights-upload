@@ -20,6 +20,7 @@ requests = "*"
 botocore = "*"
 aiokafka = "*"
 logstash_formatter = "*"
+aiohttp = "*"
 
 [requires]
 python_version = "3.6"
