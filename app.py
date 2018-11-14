@@ -6,6 +6,7 @@ import os
 import re
 import base64
 import sys
+import aiohttp
 
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
@@ -16,9 +17,8 @@ import tornado.ioloop
 import tornado.web
 from tornado.ioloop import IOLoop
 
-from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from aiokafka import AIOKafkaProducer
 from kafka.errors import KafkaError
-from utils import mnm
 from logstash_formatter import LogstashFormatterV1
 
 # Logging
@@ -53,6 +53,8 @@ MAX_WORKERS = int(os.getenv('MAX_WORKERS', 50))
 # Maximum time to wait for an archive to upload to storage
 STORAGE_UPLOAD_TIMEOUT = int(os.getenv('STORAGE_UPLOAD_TIMEOUT', 60))
 
+VALIDATOR_URL = os.getenv('VALIDATOR_URL', 'http://validator:8080/api/validate')
+
 # these are dummy values since we can't yet get a principal or rh_account
 DUMMY_VALUES = {
     'principal': 'default_principal',
@@ -63,15 +65,10 @@ DUMMY_VALUES = {
     'size': 0
 }
 
-VALIDATION_QUEUE = os.getenv('VALIDATION_QUEUE', 'platform.upload.validation')
-
 # Message Queue
 MQ = os.getenv('KAFKAMQ', 'kafka:29092').split(',')
 MQ_GROUP_ID = os.getenv('MQ_GROUP_ID', 'upload')
-mqc = AIOKafkaConsumer(
-    VALIDATION_QUEUE, loop=IOLoop.current().asyncio_loop, bootstrap_servers=MQ,
-    group_id=MQ_GROUP_ID
-)
+
 mqp = AIOKafkaProducer(
     loop=IOLoop.current().asyncio_loop, bootstrap_servers=MQ, request_timeout_ms=10000,
     connections_max_idle_ms=None
@@ -103,37 +100,7 @@ def split_content(content):
 
 class MQStatus(object):
     """Class used to track the status of the producer/consumer clients."""
-    mqc_connected = False
     mqp_connected = False
-
-
-async def consumer():
-    """Consume indefinitely from the validation queue.
-    """
-    MQStatus.mqc_connected = False
-    while True:
-        # If not connected, attempt to connect...
-        if not MQStatus.mqc_connected:
-            try:
-                logger.info("Consume client not connected, attempting to connect...")
-                await mqc.start()
-                logger.info("Consumer client connected!")
-                MQStatus.mqc_connected = True
-            except KafkaError:
-                logger.exception('Consume client hit error, triggering re-connect...')
-                await asyncio.sleep(RETRY_INTERVAL)
-                continue
-
-        # Consume
-        try:
-            data = await mqc.getmany()
-            for tp, msgs in data.items():
-                if tp.topic == VALIDATION_QUEUE:
-                    await handle_file(msgs)
-        except KafkaError:
-            logger.exception('Consume client hit error, triggering re-connect...')
-            MQStatus.mqc_connected = False
-        await asyncio.sleep(0.1)
 
 
 async def producer():
@@ -245,6 +212,10 @@ class RootHandler(tornado.web.RequestHandler):
 class UploadHandler(tornado.web.RequestHandler):
     """Handles requests to the upload endpoint
     """
+
+    def initialize(self):
+        self._auto_finish = False
+
     def upload_validation(self):
         """Validate the upload using general criteria
 
@@ -307,6 +278,8 @@ class UploadHandler(tornado.web.RequestHandler):
                 "upload id: %s upload failed or timed out after %dsec!",
                 payload_id, STORAGE_UPLOAD_TIMEOUT
             )
+            self.set_status(500, 'Upload Failed or Timed Out')
+            self.finish()
             return None
 
         elapsed = callback.time_last_updated - upload_start
@@ -351,14 +324,36 @@ class UploadHandler(tornado.web.RequestHandler):
         if url:
             values['url'] = url
 
-            produce_queue.append({'topic': 'platform.upload.' + service, 'msg': values})
-            logger.info(
-                "Data for payload_id [%s] put on produce queue (qsize: %d)",
-                payload_id, len(produce_queue)
-            )
+            async with aiohttp.ClientSession() as session:
+                async with session.post(VALIDATOR_URL, data=json.dumps(values), headers=identity) as response:
+                    result = await response.json()
 
-            # TODO: send a metric to influx for a failed upload too?
-            IOLoop.current().run_in_executor(None, mnm.send_to_influxdb, values)
+            if result['validation'] != "success":
+                logger.error("Payload [%s] failed to validate", result['payload_id'])
+                url = await IOLoop.current().run_in_executor(
+                    None, storage.copy, storage.QUARANTINE, storage.REJECT, result['payload_id']
+                )
+                self.set_status(415, reason="Validation Failed for Payload: %s" % payload_id)
+                self.finish()
+
+            else:
+                url = await IOLoop.current().run_in_executor(
+                    None, storage.copy, storage.QUARANTINE, storage.PERM, result['payload_id']
+                )
+                logger.info(url)
+                produce_queue.append(
+                    {
+                        'topic': 'platform.upload.available',
+                        'msg': {'url': url,
+                                    'payload_id': result['payload_id'],
+                                    'id': result['id'],
+                                    'service': values['service']
+                                }
+                    },
+                )
+
+                self.set_status(200)
+                self.finish()
 
     def write_data(self, body):
         """Writes the uploaded data to a tmp file in prepartion for writing to
@@ -389,6 +384,7 @@ class UploadHandler(tornado.web.RequestHandler):
         if not self.request.files.get('upload'):
             logger.info('Upload field not found')
             self.set_status(415, "Upload field not found")
+            self.finish()
             return
 
         payload_id = self.request.headers.get('x-rh-insights-request-id')
@@ -399,6 +395,7 @@ class UploadHandler(tornado.web.RequestHandler):
             self.set_header("Content-Type", "text/plain")
             self.set_status(400)
             self.write(msg)
+            self.finish()
             return
 
         invalid = self.upload_validation()
@@ -410,22 +407,16 @@ class UploadHandler(tornado.web.RequestHandler):
             tracking_id = str(self.request.headers.get('Tracking-ID', "null"))
             service = split_content(self.request.files['upload'][0]['content_type'])
             if self.request.headers.get('x-rh-identity'):
-                logger.info('x-rh-identity: %s', base64.b64decode(self.request.headers['x-rh-identity']))
-                header = json.loads(base64.b64decode(self.request.headers['x-rh-identity']))
+                header = json.loads(base64.b64decode(self.request.headers['x-rh-identity']).decode())
                 identity = header['identity']
             size = int(self.request.headers['Content-Length'])
             body = self.request.files['upload'][0]['body']
 
             filename = await IOLoop.current().run_in_executor(None, self.write_data, body)
 
-            response = {'status': (202, 'Accepted')}
-            self.set_status(response['status'][0], response['status'][1])
-
-            # Offload the handling of the upload and producing to kafka
             asyncio.ensure_future(
                 self.process_upload(filename, size, tracking_id, payload_id, identity, service)
             )
-            return
 
     def options(self):
         """Handle OPTIONS request to upload endpoint
@@ -485,7 +476,6 @@ def main():
     logger.info(f"Web server listening on port {LISTEN_PORT}")
     loop = IOLoop.current()
     loop.set_default_executor(thread_pool_executor)
-    loop.spawn_callback(consumer)
     loop.spawn_callback(producer)
     try:
         loop.start()
