@@ -448,7 +448,6 @@ class StatusHandler(tornado.web.RequestHandler):
 
         response = {"upload_service": "up",
                     "message_queue_producer": "down",
-                    "message_queue_consumer": "down",
                     "long_term_storage": "down",
                     "quarantine_storage": "down",
                     "rejected_storage": "down"}
@@ -461,8 +460,6 @@ class StatusHandler(tornado.web.RequestHandler):
             response['rejected_storage'] = "up"
         if MQStatus.mqp_connected:
             response['message_queue_producer'] = "up"
-        if MQStatus.mqc_connected:
-            response['message_queue_consumer'] = "up"
 
         self.write(response)
 
