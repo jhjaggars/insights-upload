@@ -13,7 +13,6 @@ from importlib import import_module
 from tempfile import NamedTemporaryFile
 from time import sleep, time
 
-import tornado.ioloop
 import tornado.web
 from tornado.ioloop import IOLoop
 
