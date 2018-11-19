@@ -234,6 +234,13 @@ class UploadHandler(tornado.web.RequestHandler):
         """
         self.write("Accepted Content-Types: gzipped tarfile, zip file")
 
+    async def post_to_validator(self, url, values, identity):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=json.dumps(values), headers=identity) as response:
+                result = await response.json()
+
+        return result
+
     async def upload(self, filename, tracking_id, payload_id):
         """Write the payload to the configured storage
 
@@ -324,9 +331,7 @@ class UploadHandler(tornado.web.RequestHandler):
         if url:
             values['url'] = url
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(VALIDATOR_URL, data=json.dumps(values), headers=identity) as response:
-                    result = await response.json()
+            result = await self.post_to_validator(VALIDATOR_URL, values, identity)
 
             if result['validation'] != "success":
                 logger.error("Payload [%s] failed to validate", result['payload_id'])
