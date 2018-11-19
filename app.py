@@ -350,9 +350,9 @@ class UploadHandler(tornado.web.RequestHandler):
                     {
                         'topic': 'platform.upload.available',
                         'msg': {'url': url,
-                                    'payload_id': result['payload_id'],
-                                    'id': result['id'],
-                                    'service': values['service']
+                                'payload_id': result['payload_id'],
+                                'id': result['id'],
+                                'service': values['service']
                                 }
                     },
                 )
