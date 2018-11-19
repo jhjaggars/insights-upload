@@ -232,6 +232,7 @@ class UploadHandler(tornado.web.RequestHandler):
         """Handles GET requests to the upload endpoint
         """
         self.write("Accepted Content-Types: gzipped tarfile, zip file")
+        self.finish()
 
     async def post_to_validator(self, url, values, identity):
         async with aiohttp.ClientSession() as session:
@@ -406,6 +407,7 @@ class UploadHandler(tornado.web.RequestHandler):
 
         if invalid:
             self.set_status(invalid[0], invalid[1])
+            self.finish()
             return
         else:
             tracking_id = str(self.request.headers.get('Tracking-ID', "null"))
@@ -426,6 +428,7 @@ class UploadHandler(tornado.web.RequestHandler):
         """Handle OPTIONS request to upload endpoint
         """
         self.add_header('Allow', 'GET, POST, HEAD, OPTIONS')
+        self.finish()
 
 
 class VersionHandler(tornado.web.RequestHandler):
