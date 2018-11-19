@@ -2,13 +2,11 @@ import asyncio
 import io
 import json
 import os
-import asyncio
 
 import boto3
 import moto
 import pytest
 import requests
-from botocore.exceptions import ClientError
 from tornado.httpclient import AsyncHTTPClient, HTTPClientError
 from tornado.testing import AsyncHTTPTestCase, gen_test
 
