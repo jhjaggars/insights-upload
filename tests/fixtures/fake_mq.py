@@ -38,15 +38,14 @@ class FakeMQ(object):
     is_down = False
 
     def __enter__(self):
-        self._orig_mqc, self._orig_mqp = app.mqc, app.mqp
-        app.mqc, app.mqp = self, self
+        self._orig_mqp = app.mqp
+        app.mqp = self
         return self
 
     def __exit__(self, *args):
-        app.mqp, app.mqc = self._orig_mqp, self._orig_mqc
+        app.mqp = self._orig_mqp
 
     def __init__(self, *args, **kwargs):
-        self._orig_mqc = None
         self._orig_mqp = None
         for k, v in kwargs.items():
             if not hasattr(self, k):
