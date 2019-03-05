@@ -186,8 +186,6 @@ async def handle_file(msgs):
     """Determine which bucket to put a payload in based on the message
        returned from the validating service.
 
-    storage.copy operations are not async so we offload to the executor
-
     Arguments:
         msgs -- list of kafka messages consumed on validation topic
     """
@@ -212,9 +210,7 @@ async def handle_file(msgs):
             if result.lower() == 'success':
                 mnm.uploads_validated.inc()
 
-                url = await IOLoop.current().run_in_executor(
-                    None, storage.copy, storage.QUARANTINE, storage.PERM, payload_id
-                )
+                url = await storage.copy(storage.QUARANTINE, storage.PERM, payload_id)
                 data = {
                     'topic': 'platform.upload.available',
                     'msg': {
@@ -238,9 +234,7 @@ async def handle_file(msgs):
             elif result.lower() == 'failure':
                 mnm.uploads_invalidated.inc()
                 logger.info('payload_id [%s] rejected', payload_id)
-                url = await IOLoop.current().run_in_executor(
-                    None, storage.copy, storage.QUARANTINE, storage.REJECT, payload_id
-                )
+                url = storage.copy(storage.QUARANTINE, storage.REJECT, payload_id)
             else:
                 logger.info('Unrecognized result: %s', result.lower())
         else:
@@ -338,9 +332,7 @@ class UploadHandler(tornado.web.RequestHandler):
         logger.info("tracking id [%s] payload_id [%s] attempting upload", tracking_id, payload_id, extra={"payload_id": payload_id})
 
         try:
-            url = await IOLoop.current().run_in_executor(
-                None, storage.write, filename, storage.QUARANTINE, payload_id
-            )
+            url = await storage.write(filename, storage.QUARANTINE, payload_id)
             elapsed = time() - upload_start
 
             logger.info(
